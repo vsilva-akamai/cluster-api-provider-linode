@@ -33,6 +33,9 @@ type MachineScope struct {
 	LinodeClient  clients.LinodeClient
 	LinodeCluster *infrav1alpha2.LinodeCluster
 	LinodeMachine *infrav1alpha2.LinodeMachine
+	// ClassifiedCreateError protects a classified Ready written during this reconcile
+	// from the deferred generic error handler. It is not persisted.
+	ClassifiedCreateError bool
 }
 
 func validateMachineScopeParams(params MachineScopeParams) error {

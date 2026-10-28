@@ -12,6 +12,53 @@ This could be due to the `LINODE_TOKEN` either not being set in your environment
 If expired, [provision a new token](../topics/getting-started.md#prerequisites) and optionally
 set the "Expiry" to "Never" (default expiry is 6 months).
 
+### Instance creation is blocked by capacity or an account limit
+
+CAPL classifies exactly two Linode instance-create failures:
+
+| Condition reason | Cause | Recovery |
+| --- | --- | --- |
+| `InsufficientCapacity` | The Linode API returns HTTP 403 indicating that the requested plan is not currently available in the selected region. | Wait for capacity, choose another plan or region for replacement Machines, or contact Support. |
+| `AccountLimitReached` | The Linode API returns HTTP 400 indicating that the account's active-services limit has been reached. | Remove unused services or contact Support to request a limit increase. |
+
+Both `PreflightCreated` and `Ready` on the `LinodeMachine` become `False`, with
+the classified reason and original error message for diagnostics. CAPI mirrors
+`Ready` into the owning Machine's `InfrastructureReady` condition. Inspect them
+on the management cluster:
+
+```bash
+kubectl get linodemachine "$LINODE_MACHINE_NAME" -n "$NAMESPACE" \
+  -o jsonpath='{range .status.conditions[?(@.type=="PreflightCreated")]}{.type}{"\t"}{.status}{"\t"}{.reason}{"\t"}{.message}{"\n"}{end}{range .status.conditions[?(@.type=="Ready")]}{.type}{"\t"}{.status}{"\t"}{.reason}{"\t"}{.message}{"\n"}{end}'
+kubectl get machine "$MACHINE_NAME" -n "$NAMESPACE" \
+  -o jsonpath='{range .status.conditions[?(@.type=="InfrastructureReady")]}{.type}{"\t"}{.status}{"\t"}{.reason}{"\t"}{.message}{"\n"}{end}'
+```
+
+The classified conditions survive HTTP 408, 429, all 5xx responses, SDK
+pseudo-errors, and non-API errors such as transport failures. A later recognized
+failure replaces the reason. A different API 4xx response (other than 408 or 429)
+retires it: `PreflightCreated` resumes its existing `CreateError` diagnostic and
+a classified `Ready` becomes `False/LinodeMachineProvisioning`. The existing
+HTTP 400 handler can subsequently set `Ready=False/CreateError`.
+
+Successful creation or adoption of an existing instance sets `PreflightCreated=True`
+and replaces only a classified `Ready` with `False/LinodeMachineProvisioning`
+while waiting for the instance to run. This neutral reason is not a failure.
+Readiness and provisioning completion still follow the normal lifecycle.
+
+Retry behavior is unchanged. Before the five-minute preflight timeout, supported
+transient errors use their existing fixed-delay retries; other create failures
+already trigger error backoff through the caller's `nil ProviderID` error.
+After the timeout, failed attempts return the original create error. The timeout
+counts from the first failed create, including an earlier generic error;
+False-to-False reason changes retain the persisted first-failure timestamp.
+Error retries can back off to about 17 minutes, so a classified reason may remain
+after the underlying issue is resolved until another attempt succeeds.
+
+Existing generic diagnostics, events, and legacy failure fields remain unchanged
+outside preservation or retirement of this signal. `CreateError` is an internal
+diagnostic, not another classified category; absence of a classified reason does
+not rule out other provisioning problems.
+
 ### One or more control plane replicas are missing
 
 Take a look at the `KubeadmControlPlane` controller logs and look for any potential errors:
