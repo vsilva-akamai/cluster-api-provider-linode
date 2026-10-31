@@ -37,13 +37,14 @@ The classified conditions survive HTTP 408, 429, all 5xx responses, SDK
 pseudo-errors, and non-API errors such as transport failures. A later recognized
 failure replaces the reason. A different API 4xx response (other than 408 or 429)
 retires it: `PreflightCreated` resumes its existing `CreateError` diagnostic and
-a classified `Ready` becomes `False/LinodeMachineProvisioning`. The existing
-HTTP 400 handler can subsequently set `Ready=False/CreateError`.
+a classified `Ready` condition is removed. The existing HTTP 400 handler can
+subsequently set `Ready=False/CreateError`.
 
 Successful creation or adoption of an existing instance sets `PreflightCreated=True`
-and replaces only a classified `Ready` with `False/LinodeMachineProvisioning`
-while waiting for the instance to run. This neutral reason is not a failure.
-Readiness and provisioning completion still follow the normal lifecycle.
+and removes only a classified `Ready` condition. No neutral reason replaces it:
+while the `LinodeMachine` has no `Ready` condition, CAPI reports the Machine's
+`InfrastructureReady` with its standard fallback reason (`NotReady`). Readiness
+and provisioning completion still follow the normal lifecycle.
 
 Retry behavior is unchanged. Before the five-minute preflight timeout, supported
 transient errors use their existing fixed-delay retries; other create failures

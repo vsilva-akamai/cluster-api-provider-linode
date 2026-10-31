@@ -649,7 +649,7 @@ func (r *LinodeMachineReconciler) reconcilePreflightCreate(ctx context.Context, 
 	})
 	// Set the provider ID since the instance is successfully created
 	machineScope.LinodeMachine.Spec.ProviderID = new(fmt.Sprintf("linode://%d", linodeInstance.ID))
-	retireClassifiedCreateReady(machineScope.LinodeMachine, "instance created, waiting for it to be running")
+	retireClassifiedCreateReady(machineScope.LinodeMachine)
 	return ctrl.Result{}, nil
 }
 

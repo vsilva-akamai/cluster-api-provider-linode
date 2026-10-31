@@ -787,7 +787,8 @@ var _ = Describe("create", Label("machine", "create"), func() {
 		},
 			Entry("unknown 400", unknownErr, time.Duration(0)),
 			Entry("first 503", serverErr, rutil.DefaultMachineControllerRetryDelay),
-			Entry("raw deadline", context.DeadlineExceeded, time.Duration(0)),
+			Entry("raw deadline", context.DeadlineExceeded, rutil.DefaultMachineControllerRetryDelay),
+			Entry("decoding", &json.SyntaxError{Offset: 1}, time.Duration(0)),
 		)
 
 		DescribeTable("preserves classified conditions across excluded errors", func(ctx SpecContext, createErr error, delay time.Duration) {
@@ -805,8 +806,8 @@ var _ = Describe("create", Label("machine", "create"), func() {
 			Entry("SDK code 0", &linodego.Error{Code: 0}, time.Duration(0)),
 			Entry("SDK code 1", &linodego.Error{Code: 1}, time.Duration(0)),
 			Entry("SDK code 3", &linodego.Error{Code: 3}, time.Duration(0)),
-			Entry("raw deadline", context.DeadlineExceeded, time.Duration(0)),
-			Entry("wrapped deadline", fmt.Errorf("request: %w", context.DeadlineExceeded), time.Duration(0)),
+			Entry("raw deadline", context.DeadlineExceeded, rutil.DefaultMachineControllerRetryDelay),
+			Entry("wrapped deadline", fmt.Errorf("request: %w", context.DeadlineExceeded), rutil.DefaultMachineControllerRetryDelay),
 			Entry("DNS", &net.DNSError{Err: "no such host", Name: "api.example.invalid"}, time.Duration(0)),
 			Entry("connection", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}, time.Duration(0)),
 			Entry("decoding", &json.SyntaxError{Offset: 1}, time.Duration(0)),
@@ -841,10 +842,7 @@ var _ = Describe("create", Label("machine", "create"), func() {
 			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
 			Expect(condition.Reason).To(Equal(util.CreateError))
 			Expect(condition.Message).To(Equal(createErr.Error()))
-			ready := linodeMachine.GetCondition(clusterv1.ReadyCondition)
-			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-			Expect(ready.Reason).To(Equal(infrav1alpha2.LinodeMachineProvisioning))
-			Expect(ready.Message).To(Equal("waiting for the Linode instance to be created"))
+			Expect(linodeMachine.GetCondition(clusterv1.ReadyCondition)).To(BeNil())
 		},
 			Entry("unknown 400", unknownErr),
 			Entry("401", &linodego.Error{Code: http.StatusUnauthorized, Message: "Unauthorized"}),
@@ -852,9 +850,10 @@ var _ = Describe("create", Label("machine", "create"), func() {
 			Entry("wrapped 400", fmt.Errorf("create instance: %w", unknownErr)),
 		)
 
-		DescribeTable("clears classified Ready on creation or adoption without completing provisioning", func(ctx SpecContext, adopt bool) {
+		DescribeTable("removes a classified Ready on creation or adoption without completing provisioning", func(ctx SpecContext, adopt bool) {
 			Expect(failCreate(ctx, capacityErr)).To(Equal(ctrl.Result{}))
 			expectFailure(infrav1alpha2.InsufficientCapacity, capacityErr.Error())
+			persistMachine(ctx)
 			instance := &linodego.Instance{ID: 123}
 			if adopt {
 				expectCreate(ctx, nil, &linodego.Error{Code: http.StatusBadRequest, Message: "Label must be unique"})
@@ -867,13 +866,15 @@ var _ = Describe("create", Label("machine", "create"), func() {
 			Expect(res).To(Equal(ctrl.Result{}))
 			Expect(linodeMachine.Spec.ProviderID).To(HaveValue(Equal("linode://123")))
 			Expect(linodeMachine.GetCondition(ConditionPreflightCreated).Status).To(Equal(metav1.ConditionTrue))
-			ready := linodeMachine.GetCondition(clusterv1.ReadyCondition)
-			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-			Expect(ready.Reason).To(Equal(infrav1alpha2.LinodeMachineProvisioning))
-			Expect(ready.Message).To(Equal("instance created, waiting for it to be running"))
+			Expect(linodeMachine.GetCondition(clusterv1.ReadyCondition)).To(BeNil())
 			Expect(linodeMachine.Status.Ready).To(BeFalse())
 			Expect(linodeMachine.Status.Initialization.Provisioned).To(BeNil())
 			Expect(linodeMachine.Status.InstanceState).To(BeNil())
+			// The removal must survive the patch helper, not only the in-memory object.
+			Expect(mScope.Close(ctx)).To(Succeed())
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(&linodeMachine), &linodeMachine)).To(Succeed())
+			Expect(linodeMachine.GetCondition(ConditionPreflightCreated).Status).To(Equal(metav1.ConditionTrue))
+			Expect(linodeMachine.GetCondition(clusterv1.ReadyCondition)).To(BeNil())
 		},
 			Entry("creation", false),
 			Entry("adoption after a duplicate-label error", true),
@@ -916,7 +917,7 @@ var _ = Describe("create", Label("machine", "create"), func() {
 			Entry("capacity", capacityErr, infrav1alpha2.InsufficientCapacity),
 			Entry("account limit", accountErr, infrav1alpha2.AccountLimitReached),
 			Entry("unknown 400", unknownErr, util.CreateError),
-			Entry("raw deadline", context.DeadlineExceeded, util.CreateError),
+			Entry("decoding", &json.SyntaxError{Offset: 1}, util.CreateError),
 		)
 
 		DescribeTable("keeps stale-path errors and legacy failure fields", func(ctx SpecContext, firstErr, nextErr error, reason string) {
